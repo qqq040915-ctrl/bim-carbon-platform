@@ -608,14 +608,18 @@ h2 {
   border-radius: 8px;
   box-shadow: var(--shadow);
   display: grid;
-  left: 0;
-  max-height: 310px;
+  max-height: 300px;
   overflow: auto;
   padding: 6px;
-  position: absolute;
-  right: 0;
-  top: calc(100% + 6px);
-  z-index: 30;
+  position: fixed;
+  z-index: 9999;
+}
+
+.material-suggestions-meta {
+  color: var(--blue-dark);
+  font-size: 0.82rem;
+  font-weight: 760;
+  padding: 7px 10px;
 }
 
 .material-suggestions button {
@@ -628,6 +632,7 @@ h2 {
   gap: 3px;
   padding: 9px 10px;
   text-align: left;
+  white-space: normal;
 }
 
 .material-suggestions button:hover,
@@ -638,6 +643,8 @@ h2 {
 .material-suggestions span {
   font-weight: 730;
   line-height: 1.35;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .material-suggestions small,
@@ -645,6 +652,8 @@ h2 {
   color: var(--muted);
   font-size: 0.82rem;
   line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .material-suggestions p {

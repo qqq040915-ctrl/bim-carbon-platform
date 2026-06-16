@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
 import { Bar, Pie } from 'react-chartjs-2';
 import {
@@ -225,9 +226,9 @@ function matchesMaterialCategory(itemName, category) {
   return materialCategory === category;
 }
 
-function filterMaterialOptions(databaseRows, query, category, limit = 10) {
+function filterMaterialOptions(databaseRows, query, category, limit = 20) {
   const normalizedQuery = normalizeName(query);
-  return databaseRows
+  const results = databaseRows
     .filter((row) => matchesMaterialCategory(row.itemName, category))
     .map((row) => ({
       ...row,
@@ -238,8 +239,8 @@ function filterMaterialOptions(databaseRows, query, category, limit = 10) {
     .sort((a, b) => {
       if (b.searchScore !== a.searchScore) return b.searchScore - a.searchScore;
       return a.itemName.localeCompare(b.itemName, 'zh-Hant');
-    })
-    .slice(0, limit);
+    });
+  return Number.isFinite(limit) ? results.slice(0, limit) : results;
 }
 
 function scoreMaterialMatch(keyword, row) {
@@ -328,14 +329,43 @@ function escapeHtml(value) {
 }
 
 function SearchableMaterialSelector({ category, databaseRows, disabled, onSelect, value }) {
+  const inputRef = useRef(null);
   const [inputValue, setInputValue] = useState(value || '');
   const [isOpen, setIsOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [popupStyle, setPopupStyle] = useState({ left: 0, top: 0, width: 420 });
 
-  const options = useMemo(
-    () => filterMaterialOptions(databaseRows, inputValue, category, 10),
+  const allOptions = useMemo(
+    () => filterMaterialOptions(databaseRows, inputValue, category, Infinity),
     [category, databaseRows, inputValue]
   );
+  const options = useMemo(() => allOptions.slice(0, 20), [allOptions]);
+
+  function updatePopupPosition() {
+    const input = inputRef.current;
+    if (!input) return;
+    const rect = input.getBoundingClientRect();
+    const width = Math.min(Math.max(rect.width, 420), window.innerWidth - 24);
+    const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
+    const top = Math.min(rect.bottom + 6, window.innerHeight - 90);
+    setPopupStyle({ left, top, width });
+  }
+
+  function openSuggestions() {
+    updatePopupPosition();
+    setIsOpen(true);
+  }
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const handleViewportChange = () => updatePopupPosition();
+    window.addEventListener('resize', handleViewportChange);
+    window.addEventListener('scroll', handleViewportChange, true);
+    return () => {
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('scroll', handleViewportChange, true);
+    };
+  }, [isOpen]);
 
   function selectMaterial(row) {
     onSelect(row);
@@ -346,7 +376,7 @@ function SearchableMaterialSelector({ category, databaseRows, disabled, onSelect
 
   function handleKeyDown(event) {
     if (!isOpen && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
-      setIsOpen(true);
+      openSuggestions();
       return;
     }
     if (event.key === 'ArrowDown') {
@@ -370,19 +400,21 @@ function SearchableMaterialSelector({ category, databaseRows, disabled, onSelect
     <div className="material-selector">
       <input
         disabled={disabled}
+        ref={inputRef}
         onBlur={() => window.setTimeout(() => setIsOpen(false), 120)}
         onChange={(event) => {
           setInputValue(event.target.value);
           setActiveIndex(0);
-          setIsOpen(true);
+          openSuggestions();
         }}
-        onFocus={() => setIsOpen(true)}
+        onFocus={openSuggestions}
         onKeyDown={handleKeyDown}
         placeholder="搜尋材料名稱"
         value={inputValue}
       />
-      {isOpen && !disabled && (
-        <div className="material-suggestions" role="listbox">
+      {isOpen && !disabled && createPortal(
+        <div className="material-suggestions" role="listbox" style={popupStyle}>
+          <div className="material-suggestions-meta">找到 {allOptions.length} 筆材料</div>
           {options.map((row, index) => (
             <button
               className={index === activeIndex ? 'active' : ''}
@@ -395,10 +427,13 @@ function SearchableMaterialSelector({ category, databaseRows, disabled, onSelect
             >
               <span>{row.itemName}</span>
               <small>{formatNumber(row.coe, 4)} {row.unit}</small>
+              <small>資料來源：{row.source || '未提供'}</small>
             </button>
           ))}
+          {allOptions.length > 20 && <p>還有更多結果，請繼續輸入關鍵字。</p>}
           {options.length === 0 && <p>找不到符合材料，請調整關鍵字或分類。</p>}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
