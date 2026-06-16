@@ -20,6 +20,11 @@ const PROJECT_STORAGE_KEY = 'projectDatabase';
 const ACTIVE_PROJECT_STORAGE_KEY = 'activeProjectId';
 const MAPPING_STORAGE_KEY = 'materialMappingDatabase';
 const HISTORY_STORAGE_KEY = 'bim-a1-a3-analysis-history';
+const BIM_IMPORTS_STORAGE_KEY = 'bim-carbon-bim-imports';
+const BIM_ROWS_STORAGE_KEY = 'bim-carbon-bim-rows';
+const MATERIAL_PLANS_STORAGE_KEY = 'bim-carbon-material-plans';
+const CALCULATION_STORAGE_KEY = 'bim-carbon-calculation';
+const CLOUD_SYNC_ENDPOINT = '/api/sync';
 
 const NAV_ITEMS = [
   { id: 'project-info', label: '📁 專案資訊' },
@@ -475,8 +480,11 @@ function App() {
   const [history, setHistory] = useState([]);
   const [viewedFileId, setViewedFileId] = useState('');
   const [statusMessage, setStatusMessage] = useState('請先建立並儲存專案資訊，才能進行 BIM 資料匯入與碳排分析。');
+  const cloudSyncReadyRef = useRef(false);
+  const cloudSyncTimerRef = useRef(null);
+  const cloudFallbackRef = useRef(false);
 
-  useEffect(() => {
+  function loadLocalState() {
     let loadedActiveProject = null;
     try {
       const savedProjects = JSON.parse(localStorage.getItem(PROJECT_STORAGE_KEY) || '[]');
@@ -516,7 +524,221 @@ function App() {
     } catch {
       setHistory([]);
     }
+
+    try {
+      const savedImports = JSON.parse(localStorage.getItem(BIM_IMPORTS_STORAGE_KEY) || '[]');
+      const savedBimRows = JSON.parse(localStorage.getItem(BIM_ROWS_STORAGE_KEY) || '[]');
+      const savedPlans = JSON.parse(localStorage.getItem(MATERIAL_PLANS_STORAGE_KEY) || '[]');
+      const savedCalculation = JSON.parse(localStorage.getItem(CALCULATION_STORAGE_KEY) || 'null');
+      setImports(
+        Array.isArray(savedImports) && loadedActiveProject
+          ? savedImports.filter((item) => !item.project_id || item.project_id === loadedActiveProject.project_id)
+          : []
+      );
+      setBimRows(
+        Array.isArray(savedBimRows) && loadedActiveProject
+          ? savedBimRows.filter((row) => !row.project_id || row.project_id === loadedActiveProject.project_id)
+          : []
+      );
+      setMaterialPlans(
+        Array.isArray(savedPlans) && loadedActiveProject
+          ? savedPlans.filter((plan) => !plan.project_id || plan.project_id === loadedActiveProject.project_id)
+          : []
+      );
+      setCalculation(savedCalculation);
+    } catch {
+      setImports([]);
+      setBimRows([]);
+      setMaterialPlans([]);
+      setCalculation(null);
+    }
+    return loadedActiveProject;
+  }
+
+  async function apiRequest(path, options = {}) {
+    const response = await fetch(path, {
+      ...options,
+      headers: {
+        'content-type': 'application/json',
+        ...(options.headers ?? {}),
+      },
+    });
+    const data = await response.json();
+    if (!response.ok || data.ok === false) {
+      throw new Error(data.error || `API request failed: ${response.status}`);
+    }
+    return data;
+  }
+
+  function persistLocalSnapshot(nextState) {
+    const projectId = nextState.activeProject?.project_id ?? '';
+    const mergeProjectItems = (storageKey, items) => {
+      if (nextState.fullSnapshot || !projectId) return items;
+      const saved = readStorageJson(storageKey, []);
+      return [
+        ...saved.filter((item) => item.project_id && item.project_id !== projectId),
+        ...items,
+      ];
+    };
+    const nextMappings = mergeProjectItems(MAPPING_STORAGE_KEY, nextState.materialMappings);
+    const nextHistory = mergeProjectItems(HISTORY_STORAGE_KEY, nextState.history);
+    const nextImports = mergeProjectItems(BIM_IMPORTS_STORAGE_KEY, nextState.imports ?? imports);
+    const nextBimRows = mergeProjectItems(BIM_ROWS_STORAGE_KEY, nextState.bimRows ?? bimRows);
+    const nextPlans = mergeProjectItems(MATERIAL_PLANS_STORAGE_KEY, nextState.materialPlans ?? materialPlans);
+    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(nextState.projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, nextState.activeProject?.project_id ?? '');
+    localStorage.setItem(MAPPING_STORAGE_KEY, JSON.stringify(nextMappings));
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(nextHistory));
+    localStorage.setItem(BIM_IMPORTS_STORAGE_KEY, JSON.stringify(nextImports));
+    localStorage.setItem(BIM_ROWS_STORAGE_KEY, JSON.stringify(nextBimRows));
+    localStorage.setItem(MATERIAL_PLANS_STORAGE_KEY, JSON.stringify(nextPlans));
+    localStorage.setItem(CALCULATION_STORAGE_KEY, JSON.stringify(nextState.calculation ?? calculation));
+  }
+
+  function applyCloudState(cloudState) {
+    const normalizedProjects = Array.isArray(cloudState.projectDatabase)
+      ? cloudState.projectDatabase.map(normalizeProject).filter((project) => project.project_id)
+      : [];
+    const activeProjectId = cloudState.activeProjectId || cloudState.activeProject?.project_id || '';
+    const loadedActiveProject =
+      normalizedProjects.find((project) => project.project_id === activeProjectId) ??
+      normalizedProjects[0] ??
+      null;
+    const allMappings = Array.isArray(cloudState.materialMappingDatabase)
+      ? cloudState.materialMappingDatabase.map(normalizeMapping)
+      : [];
+    const allHistory = Array.isArray(cloudState.history) ? cloudState.history : [];
+    const nextImports = Array.isArray(cloudState.bimImportSummary) ? cloudState.bimImportSummary : [];
+    const nextBimRows = Array.isArray(cloudState.bimRows) ? cloudState.bimRows : [];
+    const nextPlans = Array.isArray(cloudState.materialPlans) ? cloudState.materialPlans : [];
+
+    setProjects(normalizedProjects);
+    setActiveProject(loadedActiveProject);
+    setProjectInfo(loadedActiveProject ?? emptyProjectInfo());
+    setImports(loadedActiveProject ? nextImports.filter((item) => !item.project_id || item.project_id === loadedActiveProject.project_id) : nextImports);
+    setBimRows(loadedActiveProject ? nextBimRows.filter((row) => !row.project_id || row.project_id === loadedActiveProject.project_id) : nextBimRows);
+    setMaterialMappings(
+      loadedActiveProject
+        ? allMappings.filter((mapping) => !mapping.project_id || mapping.project_id === loadedActiveProject.project_id)
+        : []
+    );
+    setMaterialPlans(
+      loadedActiveProject ? nextPlans.filter((plan) => !plan.project_id || plan.project_id === loadedActiveProject.project_id) : nextPlans
+    );
+    setHistory(loadedActiveProject ? filterProjectRecords(allHistory, loadedActiveProject.project_id) : []);
+    setCalculation(cloudState.calculation ?? null);
+    persistLocalSnapshot({
+      projects: normalizedProjects,
+      activeProject: loadedActiveProject,
+      materialMappings: allMappings,
+      history: allHistory,
+      imports: nextImports,
+      bimRows: nextBimRows,
+      materialPlans: nextPlans,
+      calculation: cloudState.calculation ?? null,
+      fullSnapshot: true,
+    });
+    if (loadedActiveProject) {
+      setStatusMessage('雲端資料已載入，可以進行 BIM 資料匯入與碳排分析。');
+    } else {
+      setStatusMessage('雲端資料庫已連線，請建立專案後開始分析。');
+    }
+  }
+
+  function buildCloudPayload() {
+    const storedProjects = readStorageJson(PROJECT_STORAGE_KEY, projects);
+    const projectId = activeProject?.project_id ?? '';
+    const mergeProjectItems = (storageKey, items) => {
+      const saved = readStorageJson(storageKey, []);
+      if (!projectId) return saved.length ? saved : items;
+      return [
+        ...saved.filter((item) => item.project_id && item.project_id !== projectId),
+        ...items,
+      ];
+    };
+    const mergedMappings = mergeProjectItems(MAPPING_STORAGE_KEY, materialMappings);
+    const mergedHistory = mergeProjectItems(HISTORY_STORAGE_KEY, history);
+    const mergedImports = mergeProjectItems(BIM_IMPORTS_STORAGE_KEY, imports);
+    const mergedBimRows = mergeProjectItems(BIM_ROWS_STORAGE_KEY, bimRows);
+    const mergedPlans = mergeProjectItems(MATERIAL_PLANS_STORAGE_KEY, materialPlans);
+    return {
+      projectDatabase: storedProjects.length ? storedProjects : projects,
+      activeProject,
+      activeProjectId: activeProject?.project_id ?? '',
+      bimImportSummary: mergedImports,
+      bimRows: mergedBimRows,
+      materialMappingDatabase: mergedMappings,
+      materialPlans: mergedPlans,
+      history: mergedHistory,
+      calculation,
+    };
+  }
+
+  async function syncCloudData() {
+    if (!cloudSyncReadyRef.current || cloudFallbackRef.current) return;
+    try {
+      await apiRequest(CLOUD_SYNC_ENDPOINT, {
+        method: 'POST',
+        body: JSON.stringify(buildCloudPayload()),
+      });
+    } catch {
+      cloudFallbackRef.current = true;
+      setStatusMessage('D1 雲端資料庫暫時無法連線，已改用瀏覽器本機資料作為備援。');
+    }
+  }
+
+  useEffect(() => {
+    let canceled = false;
+    loadLocalState();
+
+    apiRequest(CLOUD_SYNC_ENDPOINT)
+      .then((cloudState) => {
+        if (canceled) return;
+        applyCloudState(cloudState);
+        cloudFallbackRef.current = false;
+      })
+      .catch(() => {
+        if (canceled) return;
+        cloudFallbackRef.current = true;
+        setStatusMessage('D1 雲端資料庫暫時無法連線，已使用瀏覽器本機資料作為備援。');
+      })
+      .finally(() => {
+        if (!canceled) cloudSyncReadyRef.current = true;
+      });
+
+    return () => {
+      canceled = true;
+      if (cloudSyncTimerRef.current) clearTimeout(cloudSyncTimerRef.current);
+    };
+    // Cloud bootstrap intentionally runs once; subsequent changes are handled by the sync effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!cloudSyncReadyRef.current || cloudFallbackRef.current) return;
+    if (cloudSyncTimerRef.current) clearTimeout(cloudSyncTimerRef.current);
+    cloudSyncTimerRef.current = setTimeout(() => {
+      syncCloudData();
+    }, 600);
+    // Sync uses a state snapshot from this render and refs to avoid recursive cloud writes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, activeProject, imports, bimRows, materialMappings, materialPlans, history, calculation]);
+
+  useEffect(() => {
+    if (!cloudSyncReadyRef.current) return;
+    persistLocalSnapshot({
+      projects,
+      activeProject,
+      materialMappings,
+      history,
+      imports,
+      bimRows,
+      materialPlans,
+      calculation,
+    });
+    // Local fallback persistence mirrors the same state snapshot without becoming a dependency source.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, activeProject, imports, bimRows, materialMappings, materialPlans, history, calculation]);
 
   useEffect(() => {
     fetch('/Preview_Data.csv')
@@ -730,6 +952,10 @@ function App() {
         [ACTIVE_PROJECT_STORAGE_KEY]: localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) || '',
         [MAPPING_STORAGE_KEY]: storedMappings.length ? storedMappings : materialMappings,
         [HISTORY_STORAGE_KEY]: storedHistory.length ? storedHistory : history,
+        [BIM_IMPORTS_STORAGE_KEY]: imports,
+        [BIM_ROWS_STORAGE_KEY]: bimRows,
+        [MATERIAL_PLANS_STORAGE_KEY]: materialPlans,
+        [CALCULATION_STORAGE_KEY]: calculation,
       },
     };
 
@@ -765,6 +991,10 @@ function App() {
     localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(nextProjects));
     localStorage.setItem(MAPPING_STORAGE_KEY, JSON.stringify(nextMappings));
     localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(nextHistory));
+    localStorage.setItem(BIM_IMPORTS_STORAGE_KEY, JSON.stringify(backup.bimImportSummary ?? []));
+    localStorage.setItem(BIM_ROWS_STORAGE_KEY, JSON.stringify(backup.bimRows ?? []));
+    localStorage.setItem(MATERIAL_PLANS_STORAGE_KEY, JSON.stringify(backup.materialPlans ?? []));
+    localStorage.setItem(CALCULATION_STORAGE_KEY, JSON.stringify(backup.calculation ?? null));
     if (restoredActiveProject?.project_id) {
       localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, restoredActiveProject.project_id);
     } else {
@@ -815,6 +1045,10 @@ function App() {
     localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
     localStorage.removeItem(MAPPING_STORAGE_KEY);
     localStorage.removeItem(HISTORY_STORAGE_KEY);
+    localStorage.removeItem(BIM_IMPORTS_STORAGE_KEY);
+    localStorage.removeItem(BIM_ROWS_STORAGE_KEY);
+    localStorage.removeItem(MATERIAL_PLANS_STORAGE_KEY);
+    localStorage.removeItem(CALCULATION_STORAGE_KEY);
     setProjects([]);
     setActiveProject(null);
     setProjectInfo(emptyProjectInfo());
@@ -852,6 +1086,19 @@ function App() {
       setHistory(Array.isArray(savedHistory) ? filterProjectRecords(savedHistory, project.project_id) : []);
     } catch {
       setHistory([]);
+    }
+
+    try {
+      const savedImports = JSON.parse(localStorage.getItem(BIM_IMPORTS_STORAGE_KEY) || '[]');
+      const savedBimRows = JSON.parse(localStorage.getItem(BIM_ROWS_STORAGE_KEY) || '[]');
+      const savedPlans = JSON.parse(localStorage.getItem(MATERIAL_PLANS_STORAGE_KEY) || '[]');
+      const savedCalculation = JSON.parse(localStorage.getItem(CALCULATION_STORAGE_KEY) || 'null');
+      setImports(Array.isArray(savedImports) ? savedImports.filter((item) => !item.project_id || item.project_id === project.project_id) : []);
+      setBimRows(Array.isArray(savedBimRows) ? savedBimRows.filter((row) => !row.project_id || row.project_id === project.project_id) : []);
+      setMaterialPlans(Array.isArray(savedPlans) ? savedPlans.filter((plan) => !plan.project_id || plan.project_id === project.project_id) : []);
+      setCalculation(savedCalculation?.project_id === project.project_id ? savedCalculation : null);
+    } catch {
+      clearProjectWorkspace();
     }
   }
 
