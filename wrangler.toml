@@ -2,11 +2,7 @@ name = "bim-carbon-platform"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-06-16"
 
-# After creating the Cloudflare D1 database, bind it to Pages as `DB`.
-# If you deploy with Wrangler instead of the Cloudflare dashboard, uncomment
-# and fill in the database_id below.
-#
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "bim-carbon-platform-db"
-# database_id = "your-cloudflare-d1-database-id"
+[[d1_databases]]
+binding = "DB"
+database_name = "bim"
+database_id = "fa8e1fb6-bb77-4a77-ba6c-50e64670da54"
