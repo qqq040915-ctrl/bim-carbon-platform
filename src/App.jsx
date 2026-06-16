@@ -82,17 +82,18 @@ function emptyProjectInfo() {
 }
 
 function normalizeProject(project) {
+  const source = project.projectInfo ?? project;
   return {
-    project_id: project.project_id ?? project.projectId ?? '',
-    projectName: project.projectName ?? project.project_name ?? '',
-    engineeringName: project.engineeringName ?? project.engineering_name ?? '',
-    location: project.location ?? '',
-    buildingUse: project.buildingUse ?? project.building_use ?? '',
-    structureType: project.structureType ?? project.structure_type ?? 'RC',
-    floors: project.floors ?? '',
-    buildingArea: project.buildingArea ?? project.building_area ?? '',
-    createdDate: project.createdDate ?? project.created_date ?? today(),
-    note: project.note ?? '',
+    project_id: source.project_id ?? source.projectId ?? project.project_id ?? '',
+    projectName: source.projectName ?? source.project_name ?? '',
+    engineeringName: source.engineeringName ?? source.engineering_name ?? '',
+    location: source.location ?? '',
+    buildingUse: source.buildingUse ?? source.building_use ?? '',
+    structureType: source.structureType ?? source.structure_type ?? 'RC',
+    floors: source.floors ?? '',
+    buildingArea: source.buildingArea ?? source.building_area ?? '',
+    createdDate: source.createdDate ?? source.created_date ?? today(),
+    note: source.note ?? '',
   };
 }
 
@@ -127,6 +128,20 @@ function safeFileName(value) {
     .trim()
     .replace(/[\\/:*?"<>|]/g, '_')
     .replace(/\s+/g, '_');
+}
+
+function formatSavedAt(value) {
+  if (!value) return '已自動儲存';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '已自動儲存';
+  return `上次儲存時間：${date.toLocaleString('zh-TW', {
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })}`;
 }
 
 function normalizeName(value) {
@@ -480,22 +495,143 @@ function App() {
   const [history, setHistory] = useState([]);
   const [viewedFileId, setViewedFileId] = useState('');
   const [statusMessage, setStatusMessage] = useState('請先建立並儲存專案資訊，才能進行 BIM 資料匯入與碳排分析。');
+  const [lastSavedAt, setLastSavedAt] = useState('');
   const cloudSyncReadyRef = useRef(false);
   const cloudSyncTimerRef = useRef(null);
   const cloudFallbackRef = useRef(false);
+
+  function projectInfoFromState(entry) {
+    return normalizeProject(entry.projectInfo ? { ...entry.projectInfo, project_id: entry.project_id } : entry);
+  }
+
+  function normalizeProjectState(entry) {
+    const projectInfoData = projectInfoFromState(entry);
+    return {
+      project_id: projectInfoData.project_id,
+      projectInfo: projectInfoData,
+      importedFiles: entry.importedFiles ?? entry.bimImportSummary ?? [],
+      bimRows: entry.bimRows ?? [],
+      bimCheckResults: entry.bimCheckResults ?? null,
+      materialMappings: Array.isArray(entry.materialMappings)
+        ? entry.materialMappings.map(normalizeMapping)
+        : Array.isArray(entry.materialMappingDatabase)
+          ? entry.materialMappingDatabase.map(normalizeMapping)
+          : [],
+      materialSchemes: entry.materialSchemes ?? entry.materialPlans ?? [],
+      analysisResults: entry.analysisResults ?? entry.calculation ?? null,
+      historyResults: entry.historyResults ?? entry.history ?? [],
+      updatedAt: entry.updatedAt ?? '',
+    };
+  }
+
+  function readProjectStates() {
+    const saved = readStorageJson(PROJECT_STORAGE_KEY, []);
+    return saved.map(normalizeProjectState).filter((project) => project.project_id);
+  }
+
+  function buildBimCheckResults(sourceBimRows = bimRows, sourceMappings = materialMappings) {
+    const total = sourceBimRows.length;
+    const missing = {
+      type: sourceBimRows.filter((row) => !row.hasType).length,
+      material: sourceBimRows.filter((row) => !row.hasMaterial).length,
+      volume: sourceBimRows.filter((row) => !row.hasVolume).length,
+      quantity: sourceBimRows.filter((row) => !row.hasQuantity).length,
+    };
+    const missingFields = Object.entries(missing)
+      .filter(([, count]) => count > 0)
+      .map(([field, count]) => ({ field, count }));
+    const fieldTotal = total * 4;
+    const missingTotal = Object.values(missing).reduce((sum, count) => sum + count, 0);
+    const completionRate = fieldTotal > 0 ? ((fieldTotal - missingTotal) / fieldTotal) * 100 : 0;
+    const mappedNames = new Set(sourceMappings.map((mapping) => normalizeName(mapping.bimMaterialName)));
+    const materialRecognitionResults = [...new Set(sourceBimRows.map((row) => row.materialName).filter(Boolean))].map((materialName) => ({
+      materialName,
+      status: mappedNames.has(normalizeName(materialName)) ? '已完成對應' : '待確認材料',
+    }));
+    return {
+      fieldCompleteness: {
+        type: missing.type === 0,
+        material: missing.material === 0,
+        volume: missing.volume === 0,
+        quantity: missing.quantity === 0,
+      },
+      missingFields,
+      completionRate,
+      materialRecognitionResults,
+      pendingMaterials: materialRecognitionResults.filter((item) => item.status !== '已完成對應'),
+    };
+  }
+
+  function buildCurrentProjectState(overrides = {}) {
+    const projectInfoData = normalizeProject(overrides.projectInfo ?? activeProject ?? projectInfo);
+    const stateImports = overrides.imports ?? imports;
+    const stateBimRows = overrides.bimRows ?? bimRows;
+    const stateMappings = overrides.materialMappings ?? materialMappings;
+    const statePlans = overrides.materialPlans ?? materialPlans;
+    const stateCalculation = overrides.calculation ?? calculation;
+    const stateHistory = overrides.history ?? history;
+    const updatedAt = overrides.updatedAt ?? new Date().toISOString();
+
+    return {
+      project_id: projectInfoData.project_id,
+      projectInfo: projectInfoData,
+      importedFiles: stateImports,
+      bimRows: stateBimRows,
+      bimCheckResults: buildBimCheckResults(stateBimRows, stateMappings),
+      materialMappings: stateMappings,
+      materialSchemes: statePlans,
+      analysisResults: stateCalculation,
+      historyResults: stateHistory,
+      updatedAt,
+    };
+  }
+
+  function saveProjectState(projectState) {
+    if (!projectState?.project_id) return;
+    const savedStates = readProjectStates();
+    const nextStates = [
+      ...savedStates.filter((project) => project.project_id !== projectState.project_id),
+      projectState,
+    ].sort((a, b) => String(b.projectInfo.createdDate).localeCompare(String(a.projectInfo.createdDate)));
+    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(nextStates));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, projectState.project_id);
+    setProjects(nextStates.map((project) => project.projectInfo));
+    setLastSavedAt(projectState.updatedAt);
+  }
+
+  function restoreProjectState(projectState) {
+    if (!projectState) return;
+    const normalizedState = normalizeProjectState(projectState);
+    setActiveProject(normalizedState.projectInfo);
+    setProjectInfo(normalizedState.projectInfo);
+    setImports(normalizedState.importedFiles);
+    setBimRows(normalizedState.bimRows);
+    setMaterialMappings(normalizedState.materialMappings);
+    setMaterialPlans(normalizedState.materialSchemes);
+    setCalculation(normalizedState.analysisResults);
+    setHistory(normalizedState.historyResults);
+    setLastSavedAt(normalizedState.updatedAt);
+    setViewedFileId('');
+    setExpandedPlanIds([]);
+    setExpandedMappingFiles([]);
+  }
 
   function loadLocalState() {
     let loadedActiveProject = null;
     try {
       const savedProjects = JSON.parse(localStorage.getItem(PROJECT_STORAGE_KEY) || '[]');
-      const normalizedProjects = Array.isArray(savedProjects) ? savedProjects.map(normalizeProject) : [];
+      const savedStates = Array.isArray(savedProjects) ? savedProjects.map(normalizeProjectState) : [];
+      const normalizedProjects = savedStates.map((project) => project.projectInfo);
       const savedActiveProjectId = localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) || '';
       loadedActiveProject = normalizedProjects.find((project) => project.project_id === savedActiveProjectId) ?? null;
       setProjects(normalizedProjects);
-      setActiveProject(loadedActiveProject);
-      if (loadedActiveProject) {
-        setProjectInfo(loadedActiveProject);
+      const loadedState = savedStates.find((project) => project.project_id === loadedActiveProject?.project_id);
+      if (loadedState) {
+        restoreProjectState(loadedState);
         setStatusMessage('目前專案已載入，可以進行 BIM 資料匯入與碳排分析。');
+        return loadedActiveProject;
+      } else {
+        setActiveProject(loadedActiveProject);
       }
     } catch {
       setProjects([]);
@@ -571,21 +707,44 @@ function App() {
   }
 
   function persistLocalSnapshot(nextState) {
-    const projectId = nextState.activeProject?.project_id ?? '';
-    const mergeProjectItems = (storageKey, items) => {
-      if (nextState.fullSnapshot || !projectId) return items;
-      const saved = readStorageJson(storageKey, []);
-      return [
-        ...saved.filter((item) => item.project_id && item.project_id !== projectId),
-        ...items,
-      ];
-    };
-    const nextMappings = mergeProjectItems(MAPPING_STORAGE_KEY, nextState.materialMappings);
-    const nextHistory = mergeProjectItems(HISTORY_STORAGE_KEY, nextState.history);
-    const nextImports = mergeProjectItems(BIM_IMPORTS_STORAGE_KEY, nextState.imports ?? imports);
-    const nextBimRows = mergeProjectItems(BIM_ROWS_STORAGE_KEY, nextState.bimRows ?? bimRows);
-    const nextPlans = mergeProjectItems(MATERIAL_PLANS_STORAGE_KEY, nextState.materialPlans ?? materialPlans);
-    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(nextState.projects));
+    const activeProjectInfo = nextState.activeProject ?? activeProject;
+    const projectId = activeProjectInfo?.project_id ?? '';
+    const currentProjectState = projectId
+      ? buildCurrentProjectState({
+          projectInfo: activeProjectInfo,
+          imports: nextState.imports ?? imports,
+          bimRows: nextState.bimRows ?? bimRows,
+          materialMappings: nextState.materialMappings ?? materialMappings,
+          materialPlans: nextState.materialPlans ?? materialPlans,
+          calculation: nextState.calculation ?? calculation,
+          history: nextState.history ?? history,
+        })
+      : null;
+    const cloudStates = nextState.fullSnapshot && Array.isArray(nextState.projectStates)
+      ? nextState.projectStates.map(normalizeProjectState)
+      : [];
+    const savedStates = nextState.fullSnapshot ? cloudStates : readProjectStates();
+    const projectInfos = nextState.projects ?? projects;
+    const statesFromProjectList = projectInfos.map((project) => {
+      const projectInfoData = normalizeProject(project);
+      return savedStates.find((state) => state.project_id === projectInfoData.project_id) ?? {
+        ...buildCurrentProjectState({ projectInfo: projectInfoData, imports: [], bimRows: [], materialMappings: [], materialPlans: [], calculation: null, history: [] }),
+        updatedAt: '',
+      };
+    });
+    const nextProjectStates = currentProjectState
+      ? [
+          ...statesFromProjectList.filter((state) => state.project_id !== currentProjectState.project_id),
+          currentProjectState,
+        ]
+      : statesFromProjectList;
+    const nextMappings = nextProjectStates.flatMap((state) => state.materialMappings);
+    const nextHistory = nextProjectStates.flatMap((state) => state.historyResults);
+    const nextImports = nextProjectStates.flatMap((state) => state.importedFiles);
+    const nextBimRows = nextProjectStates.flatMap((state) => state.bimRows);
+    const nextPlans = nextProjectStates.flatMap((state) => state.materialSchemes);
+
+    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(nextProjectStates));
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, nextState.activeProject?.project_id ?? '');
     localStorage.setItem(MAPPING_STORAGE_KEY, JSON.stringify(nextMappings));
     localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(nextHistory));
@@ -593,12 +752,14 @@ function App() {
     localStorage.setItem(BIM_ROWS_STORAGE_KEY, JSON.stringify(nextBimRows));
     localStorage.setItem(MATERIAL_PLANS_STORAGE_KEY, JSON.stringify(nextPlans));
     localStorage.setItem(CALCULATION_STORAGE_KEY, JSON.stringify(nextState.calculation ?? calculation));
+    setLastSavedAt(currentProjectState?.updatedAt ?? lastSavedAt);
   }
 
   function applyCloudState(cloudState) {
-    const normalizedProjects = Array.isArray(cloudState.projectDatabase)
-      ? cloudState.projectDatabase.map(normalizeProject).filter((project) => project.project_id)
+    const projectStates = Array.isArray(cloudState.projectDatabase)
+      ? cloudState.projectDatabase.map(normalizeProjectState).filter((project) => project.project_id)
       : [];
+    const normalizedProjects = projectStates.map((project) => project.projectInfo);
     const activeProjectId = cloudState.activeProjectId || cloudState.activeProject?.project_id || '';
     const loadedActiveProject =
       normalizedProjects.find((project) => project.project_id === activeProjectId) ??
@@ -613,20 +774,25 @@ function App() {
     const nextPlans = Array.isArray(cloudState.materialPlans) ? cloudState.materialPlans : [];
 
     setProjects(normalizedProjects);
-    setActiveProject(loadedActiveProject);
-    setProjectInfo(loadedActiveProject ?? emptyProjectInfo());
-    setImports(loadedActiveProject ? nextImports.filter((item) => !item.project_id || item.project_id === loadedActiveProject.project_id) : nextImports);
-    setBimRows(loadedActiveProject ? nextBimRows.filter((row) => !row.project_id || row.project_id === loadedActiveProject.project_id) : nextBimRows);
-    setMaterialMappings(
-      loadedActiveProject
-        ? allMappings.filter((mapping) => !mapping.project_id || mapping.project_id === loadedActiveProject.project_id)
-        : []
-    );
-    setMaterialPlans(
-      loadedActiveProject ? nextPlans.filter((plan) => !plan.project_id || plan.project_id === loadedActiveProject.project_id) : nextPlans
-    );
-    setHistory(loadedActiveProject ? filterProjectRecords(allHistory, loadedActiveProject.project_id) : []);
-    setCalculation(cloudState.calculation ?? null);
+    const loadedState = projectStates.find((project) => project.project_id === loadedActiveProject?.project_id);
+    if (loadedState && (loadedState.importedFiles.length || loadedState.bimRows.length || loadedState.materialMappings.length || loadedState.materialSchemes.length || loadedState.historyResults.length || loadedState.analysisResults)) {
+      restoreProjectState(loadedState);
+    } else {
+      setActiveProject(loadedActiveProject);
+      setProjectInfo(loadedActiveProject ?? emptyProjectInfo());
+      setImports(loadedActiveProject ? nextImports.filter((item) => !item.project_id || item.project_id === loadedActiveProject.project_id) : nextImports);
+      setBimRows(loadedActiveProject ? nextBimRows.filter((row) => !row.project_id || row.project_id === loadedActiveProject.project_id) : nextBimRows);
+      setMaterialMappings(
+        loadedActiveProject
+          ? allMappings.filter((mapping) => !mapping.project_id || mapping.project_id === loadedActiveProject.project_id)
+          : []
+      );
+      setMaterialPlans(
+        loadedActiveProject ? nextPlans.filter((plan) => !plan.project_id || plan.project_id === loadedActiveProject.project_id) : nextPlans
+      );
+      setHistory(loadedActiveProject ? filterProjectRecords(allHistory, loadedActiveProject.project_id) : []);
+      setCalculation(cloudState.calculation ?? null);
+    }
     persistLocalSnapshot({
       projects: normalizedProjects,
       activeProject: loadedActiveProject,
@@ -636,6 +802,7 @@ function App() {
       bimRows: nextBimRows,
       materialPlans: nextPlans,
       calculation: cloudState.calculation ?? null,
+      projectStates,
       fullSnapshot: true,
     });
     if (loadedActiveProject) {
@@ -646,23 +813,18 @@ function App() {
   }
 
   function buildCloudPayload() {
-    const storedProjects = readStorageJson(PROJECT_STORAGE_KEY, projects);
-    const projectId = activeProject?.project_id ?? '';
-    const mergeProjectItems = (storageKey, items) => {
-      const saved = readStorageJson(storageKey, []);
-      if (!projectId) return saved.length ? saved : items;
-      return [
-        ...saved.filter((item) => item.project_id && item.project_id !== projectId),
-        ...items,
-      ];
-    };
-    const mergedMappings = mergeProjectItems(MAPPING_STORAGE_KEY, materialMappings);
-    const mergedHistory = mergeProjectItems(HISTORY_STORAGE_KEY, history);
-    const mergedImports = mergeProjectItems(BIM_IMPORTS_STORAGE_KEY, imports);
-    const mergedBimRows = mergeProjectItems(BIM_ROWS_STORAGE_KEY, bimRows);
-    const mergedPlans = mergeProjectItems(MATERIAL_PLANS_STORAGE_KEY, materialPlans);
+    const savedStates = readProjectStates();
+    const currentState = activeProject?.project_id ? buildCurrentProjectState() : null;
+    const projectStates = currentState
+      ? [...savedStates.filter((project) => project.project_id !== currentState.project_id), currentState]
+      : savedStates;
+    const mergedMappings = projectStates.flatMap((project) => project.materialMappings);
+    const mergedHistory = projectStates.flatMap((project) => project.historyResults);
+    const mergedImports = projectStates.flatMap((project) => project.importedFiles);
+    const mergedBimRows = projectStates.flatMap((project) => project.bimRows);
+    const mergedPlans = projectStates.flatMap((project) => project.materialSchemes);
     return {
-      projectDatabase: storedProjects.length ? storedProjects : projects,
+      projectDatabase: projectStates,
       activeProject,
       activeProjectId: activeProject?.project_id ?? '',
       bimImportSummary: mergedImports,
@@ -976,9 +1138,10 @@ function App() {
       throw new Error('invalid backup');
     }
 
-    const nextProjects = Array.isArray(backup.projectDatabase)
-      ? backup.projectDatabase.map(normalizeProject).filter((project) => project.project_id)
+    const nextProjectStates = Array.isArray(backup.projectDatabase)
+      ? backup.projectDatabase.map(normalizeProjectState).filter((project) => project.project_id)
       : [];
+    const nextProjects = nextProjectStates.map((project) => project.projectInfo);
     const restoredActiveProject =
       backup.activeProject && backup.activeProject.project_id
         ? normalizeProject(backup.activeProject)
@@ -988,7 +1151,7 @@ function App() {
       : [];
     const nextHistory = Array.isArray(backup.history) ? backup.history : [];
 
-    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(nextProjects));
+    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(nextProjectStates));
     localStorage.setItem(MAPPING_STORAGE_KEY, JSON.stringify(nextMappings));
     localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(nextHistory));
     localStorage.setItem(BIM_IMPORTS_STORAGE_KEY, JSON.stringify(backup.bimImportSummary ?? []));
@@ -1002,14 +1165,19 @@ function App() {
     }
 
     setProjects(nextProjects);
-    setActiveProject(restoredActiveProject);
-    setProjectInfo(restoredActiveProject ?? emptyProjectInfo());
-    setImports(Array.isArray(backup.bimImportSummary) ? backup.bimImportSummary : []);
-    setBimRows(Array.isArray(backup.bimRows) ? backup.bimRows : []);
-    setMaterialMappings(nextMappings);
-    setMaterialPlans(Array.isArray(backup.materialPlans) ? backup.materialPlans : []);
-    setHistory(restoredActiveProject?.project_id ? filterProjectRecords(nextHistory, restoredActiveProject.project_id) : nextHistory);
-    setCalculation(backup.calculation ?? null);
+    const restoredState = nextProjectStates.find((project) => project.project_id === restoredActiveProject?.project_id);
+    if (restoredState) {
+      restoreProjectState(restoredState);
+    } else {
+      setActiveProject(restoredActiveProject);
+      setProjectInfo(restoredActiveProject ?? emptyProjectInfo());
+      setImports(Array.isArray(backup.bimImportSummary) ? backup.bimImportSummary : []);
+      setBimRows(Array.isArray(backup.bimRows) ? backup.bimRows : []);
+      setMaterialMappings(nextMappings);
+      setMaterialPlans(Array.isArray(backup.materialPlans) ? backup.materialPlans : []);
+      setHistory(restoredActiveProject?.project_id ? filterProjectRecords(nextHistory, restoredActiveProject.project_id) : nextHistory);
+      setCalculation(backup.calculation ?? null);
+    }
     setViewedFileId('');
     setExpandedPlanIds([]);
     setExpandedMappingFiles([]);
@@ -1073,33 +1241,14 @@ function App() {
   }
 
   function loadProjectScopedData(project) {
-    try {
-      const savedMappings = JSON.parse(localStorage.getItem(MAPPING_STORAGE_KEY) || '[]');
-      const normalizedMappings = Array.isArray(savedMappings) ? savedMappings.map(normalizeMapping) : [];
-      setMaterialMappings(normalizedMappings.filter((mapping) => !mapping.project_id || mapping.project_id === project.project_id));
-    } catch {
-      setMaterialMappings([]);
+    const projectState = readProjectStates().find((state) => state.project_id === project.project_id);
+    if (projectState) {
+      restoreProjectState(projectState);
+      return;
     }
-
-    try {
-      const savedHistory = JSON.parse(localStorage.getItem(HISTORY_STORAGE_KEY) || '[]');
-      setHistory(Array.isArray(savedHistory) ? filterProjectRecords(savedHistory, project.project_id) : []);
-    } catch {
-      setHistory([]);
-    }
-
-    try {
-      const savedImports = JSON.parse(localStorage.getItem(BIM_IMPORTS_STORAGE_KEY) || '[]');
-      const savedBimRows = JSON.parse(localStorage.getItem(BIM_ROWS_STORAGE_KEY) || '[]');
-      const savedPlans = JSON.parse(localStorage.getItem(MATERIAL_PLANS_STORAGE_KEY) || '[]');
-      const savedCalculation = JSON.parse(localStorage.getItem(CALCULATION_STORAGE_KEY) || 'null');
-      setImports(Array.isArray(savedImports) ? savedImports.filter((item) => !item.project_id || item.project_id === project.project_id) : []);
-      setBimRows(Array.isArray(savedBimRows) ? savedBimRows.filter((row) => !row.project_id || row.project_id === project.project_id) : []);
-      setMaterialPlans(Array.isArray(savedPlans) ? savedPlans.filter((plan) => !plan.project_id || plan.project_id === project.project_id) : []);
-      setCalculation(savedCalculation?.project_id === project.project_id ? savedCalculation : null);
-    } catch {
-      clearProjectWorkspace();
-    }
+    setMaterialMappings([]);
+    setHistory([]);
+    clearProjectWorkspace();
   }
 
   function clearProjectWorkspace() {
@@ -1147,41 +1296,55 @@ function App() {
       ...normalizedProject,
       project_id: editingProjectId || normalizedProject.project_id || generateProjectId(projects),
     };
-    const nextProjects = [
-      ...projects.filter((project) => project.project_id !== projectToSave.project_id),
-      projectToSave,
-    ].sort((a, b) => String(b.createdDate).localeCompare(String(a.createdDate)));
+    const isEditingCurrentProject = activeProject?.project_id === projectToSave.project_id;
+    const savedState = readProjectStates().find((state) => state.project_id === projectToSave.project_id);
+    const nextProjectState = isEditingCurrentProject
+      ? buildCurrentProjectState({ projectInfo: projectToSave })
+      : savedState
+        ? { ...savedState, projectInfo: projectToSave, updatedAt: new Date().toISOString() }
+        : buildCurrentProjectState({
+            projectInfo: projectToSave,
+            imports: [],
+            bimRows: [],
+            materialMappings: [],
+            materialPlans: [],
+            calculation: null,
+            history: [],
+          });
 
-    setProjects(nextProjects);
     setActiveProject(projectToSave);
     setProjectInfo(projectToSave);
     setIsProjectFormOpen(false);
     setEditingProjectId('');
-    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(nextProjects));
-    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, projectToSave.project_id);
-    clearProjectWorkspace();
-    loadProjectScopedData(projectToSave);
-    setStatusMessage('專案建立成功，已解鎖 BIM 資料匯入功能。');
+    saveProjectState(nextProjectState);
+    if (!isEditingCurrentProject && !savedState) {
+      clearProjectWorkspace();
+      setMaterialMappings([]);
+      setHistory([]);
+    } else {
+      loadProjectScopedData(projectToSave);
+    }
+    setStatusMessage(editingProjectId ? '專案資訊已儲存，並已自動保存目前工作狀態。' : '專案建立成功，已解鎖 BIM 資料匯入功能。');
   }
 
   function loadProject(project) {
+    if (activeProject?.project_id) {
+      saveProjectState(buildCurrentProjectState());
+    }
     const normalizedProject = normalizeProject(project);
-    setActiveProject(normalizedProject);
-    setProjectInfo(normalizedProject);
     setIsProjectFormOpen(false);
     setEditingProjectId('');
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, normalizedProject.project_id);
-    clearProjectWorkspace();
     loadProjectScopedData(normalizedProject);
-    setStatusMessage(`已載入專案 ${normalizedProject.projectName}，請匯入或重新載入該專案 BIM 資料。`);
+    setStatusMessage(`已載入專案 ${normalizedProject.projectName}，可接續上次進度繼續操作。`);
     scrollToSection('project-info');
   }
 
   function deleteProject(projectId) {
     if (!window.confirm('確定要刪除此專案？此操作會移除專案清單中的資料。')) return;
-    const nextProjects = projects.filter((project) => project.project_id !== projectId);
-    setProjects(nextProjects);
-    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(nextProjects));
+    const nextStates = readProjectStates().filter((project) => project.project_id !== projectId);
+    setProjects(nextStates.map((project) => project.projectInfo));
+    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(nextStates));
 
     if (activeProject?.project_id === projectId) {
       setActiveProject(null);
@@ -1191,6 +1354,7 @@ function App() {
       clearProjectWorkspace();
       setMaterialMappings([]);
       setHistory([]);
+      setLastSavedAt('');
       localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
       setStatusMessage('已刪除目前專案。請先建立並儲存專案資訊，才能進行 BIM 資料匯入與碳排分析。');
     }
@@ -1295,6 +1459,8 @@ function App() {
           materialColumn: columns.material || '未提供結構材料欄位',
           typeColumn: columns.type || '未提供類型欄位',
           quantityColumn: columns.quantity || '未提供數量欄位',
+          rawRows: rows,
+          parsedRows,
           message: missingColumns.length > 0 ? `缺少欄位：${missingColumns.join('、')}` : '欄位檢查完成',
         },
       ]);
@@ -1922,35 +2088,23 @@ function App() {
                 {activeProject && <button className="select-button" type="button" onClick={() => openEditProjectForm()}>編輯專案</button>}
               </div>
             </div>
-            <div className="backup-panel">
-              <p>目前平台資料儲存在瀏覽器本機端。若需在不同電腦使用，請先匯出專案資料備份，再於另一台電腦匯入。</p>
-              <div className="backup-actions">
-                <button className="select-button" type="button" onClick={exportProjectBackup}>匯出專案資料</button>
-                <label className="select-button upload-inline">
-                  匯入專案資料
-                  <input
-                    type="file"
-                    accept=".json,application/json"
-                    onChange={(event) => {
-                      importProjectBackup(event.target.files?.[0]);
-                      event.target.value = '';
-                    }}
-                  />
-                </label>
-                <button className="select-button danger" type="button" onClick={clearLocalPlatformData}>清除本機資料</button>
-              </div>
-            </div>
             {!activeProject && <p className="lock-message">請先建立並儲存專案資訊，才能進行 BIM 資料匯入與碳排分析。</p>}
             {activeProject && (
-              <div className="project-summary project-card">
-                <span>專案名稱：{activeProject.projectName}</span>
-                <span>專案編號：{activeProject.project_id}</span>
-                <span>工程名稱：{activeProject.engineeringName}</span>
-                <span>工程地點：{activeProject.location || '未填寫'}</span>
-                <span>建築用途：{activeProject.buildingUse || '未填寫'}</span>
-                <span>結構形式：{activeProject.structureType || '未填寫'}</span>
-                <span>樓層數：{activeProject.floors || '未填寫'}</span>
-                <span>建立日期：{activeProject.createdDate}</span>
+              <div className="project-card">
+                <div className="project-card-header">
+                  <strong>目前專案資訊</strong>
+                  <span>{formatSavedAt(lastSavedAt)}</span>
+                </div>
+                <div className="project-summary">
+                  <span>專案名稱：{activeProject.projectName}</span>
+                  <span>專案編號：{activeProject.project_id}</span>
+                  <span>工程名稱：{activeProject.engineeringName}</span>
+                  <span>工程地點：{activeProject.location || '未填寫'}</span>
+                  <span>建築用途：{activeProject.buildingUse || '未填寫'}</span>
+                  <span>結構形式：{activeProject.structureType || '未填寫'}</span>
+                  <span>樓層數：{activeProject.floors || '未填寫'}</span>
+                  <span>建立日期：{activeProject.createdDate}</span>
+                </div>
               </div>
             )}
             {isProjectFormOpen && (
@@ -2290,6 +2444,25 @@ function App() {
           <section className="panel export-panel scroll-section" id="report-export">
             <div className="section-title"><div><h2>報表匯出</h2><p>報表包含專案資訊、材料方案、構件體積、材料對應、碳排結果與圖表摘要。</p></div></div>
             <div className="export-actions"><button className="export-button" type="button" onClick={exportExcel} disabled={!hasActiveProject || !calculation}>匯出Excel</button><button className="export-button secondary" type="button" onClick={exportPdf} disabled={!hasActiveProject || !calculation}>匯出PDF</button></div>
+            <details className="advanced-data-panel">
+              <summary>進階資料管理</summary>
+              <p>系統會自動保存目前專案狀態。下列功能僅作為手動備份、跨環境搬移或清除測試資料使用。</p>
+              <div className="backup-actions">
+                <button className="select-button" type="button" onClick={exportProjectBackup}>匯出專案資料</button>
+                <label className="select-button upload-inline">
+                  匯入專案資料
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    onChange={(event) => {
+                      importProjectBackup(event.target.files?.[0]);
+                      event.target.value = '';
+                    }}
+                  />
+                </label>
+                <button className="select-button danger" type="button" onClick={clearLocalPlatformData}>清除本機資料</button>
+              </div>
+            </details>
           </section>
         </main>
       </div>

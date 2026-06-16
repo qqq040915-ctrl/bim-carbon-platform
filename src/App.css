@@ -144,6 +144,23 @@ button {
   margin-bottom: 18px;
 }
 
+.project-card-header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.project-card-header strong {
+  color: var(--ink);
+}
+
+.project-card-header span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .backup-panel {
   align-items: center;
   background: var(--field);
@@ -168,6 +185,24 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.advanced-data-panel {
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 16px;
+}
+
+.advanced-data-panel summary {
+  color: var(--ink);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.advanced-data-panel p {
+  color: var(--muted);
+  line-height: 1.65;
+  margin: 10px 0 12px;
 }
 
 .project-info-panel {
