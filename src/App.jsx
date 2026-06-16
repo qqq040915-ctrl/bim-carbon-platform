@@ -117,6 +117,13 @@ function formatNumber(value, digits = 2) {
   });
 }
 
+function safeFileName(value) {
+  return String(value || '未命名專案')
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, '_');
+}
+
 function normalizeName(value) {
   return String(value ?? '')
     .trim()
@@ -689,6 +696,140 @@ function App() {
 
   function updateProject(field, value) {
     setProjectInfo((current) => ({ ...current, [field]: value }));
+  }
+
+  function readStorageJson(key, fallback = []) {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(key) || '');
+      return Array.isArray(parsed) ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function exportProjectBackup() {
+    const projectName = activeProject?.projectName || projectInfo.projectName || '未命名專案';
+    const storedProjects = readStorageJson(PROJECT_STORAGE_KEY, projects);
+    const storedMappings = readStorageJson(MAPPING_STORAGE_KEY, materialMappings);
+    const storedHistory = readStorageJson(HISTORY_STORAGE_KEY, history);
+    const backup = {
+      backupType: 'bim-carbon-platform-project-backup',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      projectDatabase: storedProjects.length ? storedProjects : projects,
+      activeProject,
+      activeProjectId: activeProject?.project_id ?? '',
+      bimImportSummary: imports,
+      bimRows,
+      materialMappingDatabase: storedMappings.length ? storedMappings : materialMappings,
+      materialPlans,
+      history: storedHistory.length ? storedHistory : history,
+      calculation,
+      localStorageSnapshot: {
+        [PROJECT_STORAGE_KEY]: storedProjects.length ? storedProjects : projects,
+        [ACTIVE_PROJECT_STORAGE_KEY]: localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) || '',
+        [MAPPING_STORAGE_KEY]: storedMappings.length ? storedMappings : materialMappings,
+        [HISTORY_STORAGE_KEY]: storedHistory.length ? storedHistory : history,
+      },
+    };
+
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `bim-carbon-project-backup_${safeFileName(projectName)}_${today()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setStatusMessage('專案資料已匯出為 JSON 備份檔。');
+  }
+
+  function restoreBackupData(backup) {
+    if (!backup || backup.backupType !== 'bim-carbon-platform-project-backup') {
+      throw new Error('invalid backup');
+    }
+
+    const nextProjects = Array.isArray(backup.projectDatabase)
+      ? backup.projectDatabase.map(normalizeProject).filter((project) => project.project_id)
+      : [];
+    const restoredActiveProject =
+      backup.activeProject && backup.activeProject.project_id
+        ? normalizeProject(backup.activeProject)
+        : nextProjects.find((project) => project.project_id === backup.activeProjectId) ?? null;
+    const nextMappings = Array.isArray(backup.materialMappingDatabase)
+      ? backup.materialMappingDatabase.map(normalizeMapping)
+      : [];
+    const nextHistory = Array.isArray(backup.history) ? backup.history : [];
+
+    localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(nextProjects));
+    localStorage.setItem(MAPPING_STORAGE_KEY, JSON.stringify(nextMappings));
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(nextHistory));
+    if (restoredActiveProject?.project_id) {
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, restoredActiveProject.project_id);
+    } else {
+      localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+    }
+
+    setProjects(nextProjects);
+    setActiveProject(restoredActiveProject);
+    setProjectInfo(restoredActiveProject ?? emptyProjectInfo());
+    setImports(Array.isArray(backup.bimImportSummary) ? backup.bimImportSummary : []);
+    setBimRows(Array.isArray(backup.bimRows) ? backup.bimRows : []);
+    setMaterialMappings(nextMappings);
+    setMaterialPlans(Array.isArray(backup.materialPlans) ? backup.materialPlans : []);
+    setHistory(restoredActiveProject?.project_id ? filterProjectRecords(nextHistory, restoredActiveProject.project_id) : nextHistory);
+    setCalculation(backup.calculation ?? null);
+    setViewedFileId('');
+    setExpandedPlanIds([]);
+    setExpandedMappingFiles([]);
+    setIsProjectFormOpen(false);
+    setEditingProjectId('');
+  }
+
+  function importProjectBackup(file) {
+    if (!file) return;
+    if (!window.confirm('匯入備份資料將覆蓋目前瀏覽器中的本機資料，是否繼續？')) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const backup = JSON.parse(String(event.target?.result ?? ''));
+        restoreBackupData(backup);
+        setStatusMessage('專案資料匯入成功，已完成資料還原。');
+        scrollToSection('project-info');
+      } catch {
+        setStatusMessage('匯入失敗，請確認是否為本平台匯出的專案備份檔。');
+      }
+    };
+    reader.onerror = () => {
+      setStatusMessage('匯入失敗，請確認是否為本平台匯出的專案備份檔。');
+    };
+    reader.readAsText(file);
+  }
+
+  function clearLocalPlatformData() {
+    if (!window.confirm('確定要清除目前瀏覽器中的本機資料？此操作會移除專案、材料對應、材料方案與歷史分析結果。')) return;
+
+    localStorage.removeItem(PROJECT_STORAGE_KEY);
+    localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+    localStorage.removeItem(MAPPING_STORAGE_KEY);
+    localStorage.removeItem(HISTORY_STORAGE_KEY);
+    setProjects([]);
+    setActiveProject(null);
+    setProjectInfo(emptyProjectInfo());
+    setImports([]);
+    setBimRows([]);
+    setMaterialMappings([]);
+    setMaterialPlans([]);
+    setHistory([]);
+    setCalculation(null);
+    setViewedFileId('');
+    setExpandedPlanIds([]);
+    setExpandedMappingFiles([]);
+    setIsProjectFormOpen(false);
+    setEditingProjectId('');
+    setStatusMessage('已清除本機資料。請建立專案或匯入專案資料備份。');
   }
 
   const hasActiveProject = Boolean(activeProject?.project_id);
@@ -1532,6 +1673,24 @@ function App() {
               <div className="row-actions">
                 <button className="calculate-button" type="button" onClick={openNewProjectForm}>建立專案</button>
                 {activeProject && <button className="select-button" type="button" onClick={() => openEditProjectForm()}>編輯專案</button>}
+              </div>
+            </div>
+            <div className="backup-panel">
+              <p>目前平台資料儲存在瀏覽器本機端。若需在不同電腦使用，請先匯出專案資料備份，再於另一台電腦匯入。</p>
+              <div className="backup-actions">
+                <button className="select-button" type="button" onClick={exportProjectBackup}>匯出專案資料</button>
+                <label className="select-button upload-inline">
+                  匯入專案資料
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    onChange={(event) => {
+                      importProjectBackup(event.target.files?.[0]);
+                      event.target.value = '';
+                    }}
+                  />
+                </label>
+                <button className="select-button danger" type="button" onClick={clearLocalPlatformData}>清除本機資料</button>
               </div>
             </div>
             {!activeProject && <p className="lock-message">請先建立並儲存專案資訊，才能進行 BIM 資料匯入與碳排分析。</p>}

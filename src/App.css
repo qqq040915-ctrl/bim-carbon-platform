@@ -144,6 +144,32 @@ button {
   margin-bottom: 18px;
 }
 
+.backup-panel {
+  align-items: center;
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  line-height: 1.65;
+  margin-bottom: 18px;
+  padding: 14px;
+}
+
+.backup-panel p {
+  color: var(--muted);
+  flex: 1 1 360px;
+  margin: 0;
+}
+
+.backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .project-info-panel {
   background: var(--field);
   border: 1px solid var(--line);
