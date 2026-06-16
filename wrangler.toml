@@ -2,6 +2,9 @@ name = "bim-carbon-platform"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-06-16"
 
+[assets]
+directory = "./dist"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "bim"
